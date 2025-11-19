@@ -1,0 +1,5 @@
+oclc_matcher.log
+sampleData/*
+
+# Environment variables
+.env
