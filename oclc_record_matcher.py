@@ -707,17 +707,21 @@ class OCLCISBNMatcher:
         Returns:
             Column index of format column, or None if not found
         """
-        # Look for common format column names
+        # Look for common format column names (case-insensitive matching)
         format_column_names = [
-            'Format', 'format', 'Format Type', 'format_type', 'Type', 'type'
+            'Format', 'Format Type', 'Type'
         ]
+        # Normalize to lowercase for case-insensitive comparison
+        format_column_names_lower = {name.lower() for name in format_column_names}
         
         # Check the first row for column headers
         for col in range(1, worksheet.max_column + 1):
             cell_value = worksheet.cell(row=1, column=col).value
-            if cell_value and str(cell_value).strip() in format_column_names:
-                logger.info(f"Found format column: {cell_value} at column {col}")
-                return col
+            if cell_value:
+                cell_value_str = str(cell_value).strip()
+                if cell_value_str.lower() in format_column_names_lower:
+                    logger.info(f"Found format column: {cell_value} at column {col}")
+                    return col
         
         logger.warning("No format column found - will use default itemSubType")
         return None
@@ -732,18 +736,21 @@ class OCLCISBNMatcher:
         Returns:
             Column index of description column, or None if not found
         """
-        # Look for common description column names
+        # Look for common description column names (case-insensitive matching)
         description_column_names = [
-            'Description', 'description', 'Physical Description', 'physical_description', 
-            'PhysicalDesc', 'physical_desc', 'Desc', 'desc'
+            'Description', 'Physical Description', 'PhysicalDesc', 'Desc'
         ]
+        # Normalize to lowercase for case-insensitive comparison
+        description_column_names_lower = {name.lower() for name in description_column_names}
         
         # Check the first row for column headers
         for col in range(1, worksheet.max_column + 1):
             cell_value = worksheet.cell(row=1, column=col).value
-            if cell_value and str(cell_value).strip() in description_column_names:
-                logger.info(f"Found description column: {cell_value} at column {col}")
-                return col
+            if cell_value:
+                cell_value_str = str(cell_value).strip()
+                if cell_value_str.lower() in description_column_names_lower:
+                    logger.info(f"Found description column: {cell_value} at column {col}")
+                    return col
         
         logger.debug("No description column found")
         return None
@@ -788,7 +795,7 @@ class OCLCISBNMatcher:
 
     def find_column_by_name(self, worksheet, column_names: list) -> Optional[int]:
         """
-        Find a column by name in the worksheet.
+        Find a column by name in the worksheet (case-insensitive matching).
         
         Args:
             worksheet: OpenPyXL worksheet object
@@ -797,17 +804,23 @@ class OCLCISBNMatcher:
         Returns:
             Column index of the column, or None if not found
         """
+        # Normalize to lowercase for case-insensitive comparison
+        column_names_lower = {name.lower() if isinstance(name, str) else str(name).lower() for name in column_names}
+        
         for col in range(1, worksheet.max_column + 1):
             cell_value = worksheet.cell(row=1, column=col).value
-            if cell_value and str(cell_value).strip() in column_names:
-                logger.debug(f"Found column: {cell_value} at column {col}")
-                return col
+            if cell_value:
+                cell_value_str = str(cell_value).strip()
+                if cell_value_str.lower() in column_names_lower:
+                    logger.debug(f"Found column: {cell_value} at column {col}")
+                    return col
         
         return None
     
     def find_isbn_columns(self, worksheet) -> List[Tuple[int, str]]:
         """
-        Find all columns containing ISBNs.
+        Find all columns containing ISBNs by checking if column name contains "ISBN" 
+        (case-insensitive substring matching).
         
         Args:
             worksheet: OpenPyXL worksheet object
@@ -815,20 +828,17 @@ class OCLCISBNMatcher:
         Returns:
             List of tuples (column_index, column_name) containing ISBNs
         """
-        # Look for common ISBN column names
-        isbn_column_names = [
-            'ISBN', 'isbn', 'Isbn', 'ISBN13', 'ISBN10', 'isbn13', 'isbn10',
-            'XML ISBN', 'HC ISBN', 'PB ISBN', 'ePub ISBN', 'ePDF ISBN'
-        ]
-        
         isbn_columns = []
         
         # Check the first row for column headers
         for col in range(1, worksheet.max_column + 1):
             cell_value = worksheet.cell(row=1, column=col).value
-            if cell_value and str(cell_value).strip() in isbn_column_names:
-                isbn_columns.append((col, str(cell_value).strip()))
-                logger.info(f"Found ISBN column: {cell_value} at column {col}")
+            if cell_value:
+                cell_value_str = str(cell_value).strip()
+                # Check if column name contains "ISBN" (case-insensitive)
+                if 'isbn' in cell_value_str.lower():
+                    isbn_columns.append((col, cell_value_str))
+                    logger.info(f"Found ISBN column: {cell_value} at column {col}")
         
         if not isbn_columns:
             logger.warning("No ISBN column headers found")
