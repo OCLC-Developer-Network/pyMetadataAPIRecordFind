@@ -122,15 +122,80 @@ class OCLCISBNMatcher:
         Refresh the OAuth 2.0 access token using client credentials flow.
         """
         try:
-            token = self.oauth.fetch_token(
-                token_url=self.oauth_token_url,
-                client_id=self.api_key,
-                client_secret=self.api_secret
+            # OCLC OAuth requires Basic Auth with client_id:client_secret
+            # and grant_type=client_credentials in the body
+            import base64
+            auth_string = f"{self.api_key}:{self.api_secret}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            headers = {
+                'Authorization': f'Basic {auth_b64}',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json'
+            }
+            
+            data = {
+                'grant_type': 'client_credentials',
+                'scope': 'WorldCatMetadataAPI'
+            }
+            
+            if self.api_logging:
+                logger.info(f"OAuth Token Request - URL: {self.oauth_token_url}")
+                logger.info(f"OAuth Token Request - Headers: {dict(headers)}")
+                logger.info(f"OAuth Token Request - Data: {data}")
+            
+            response = requests.post(
+                self.oauth_token_url,
+                headers=headers,
+                data=data,
+                timeout=self.timeout
             )
-            self.access_token = token.get('access_token')
+            
+            if self.api_logging:
+                logger.info(f"OAuth Token Response - Status: {response.status_code}")
+                logger.info(f"OAuth Token Response - Headers: {dict(response.headers)}")
+                logger.info(f"OAuth Token Response - Body: {response.text[:500]}")
+            
+            response.raise_for_status()
+            
+            token_data = response.json()
+            
+            # Check if access_token is in the response
+            if 'access_token' not in token_data:
+                logger.error(f"OAuth response missing access_token. Full response: {token_data}")
+                raise ValueError(
+                    f"OAuth response missing access_token. Response keys: {list(token_data.keys())}"
+                )
+            
+            self.access_token = token_data['access_token']
+            
+            if not self.access_token:
+                logger.error(f"OAuth response has empty access_token. Full response: {token_data}")
+                raise ValueError("OAuth response has empty access_token")
+            
             logger.info("Successfully obtained OAuth access token")
+            
+            # Log token expiration if available
+            if 'expires_in' in token_data:
+                logger.debug(f"Token expires in {token_data['expires_in']} seconds")
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP error during OAuth token request: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response headers: {dict(e.response.headers)}")
+                try:
+                    error_body = e.response.text
+                    logger.error(f"Response body: {error_body[:500]}")
+                except:
+                    logger.error("Could not read response body")
+            raise ValueError(f"Authentication failed: {e}")
         except Exception as e:
             logger.error(f"Failed to obtain OAuth access token: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise ValueError(f"Authentication failed: {e}")
     
     def _get_headers(self) -> Dict[str, str]:
@@ -196,8 +261,8 @@ class OCLCISBNMatcher:
             query_parts = [f"bn:{isbn}" for isbn in clean_isbns]
             query = " OR ".join(query_parts)
             
-            # API endpoint for WorldCat Metadata API search
-            url = f"{self.base_url}/worldcat/search/bibs"
+            # API endpoint for WorldCat Metadata API search (using brief-bibs endpoint)
+            url = f"{self.base_url}/worldcat/search/brief-bibs"
             
             # Determine whether to use itemType or itemSubType based on format
             if format_type is None:
@@ -284,8 +349,8 @@ class OCLCISBNMatcher:
                 oclc_number = identifier.get('oclcNumber')
                 
                 if oclc_number:
-                    # Check for LCSH subjects in the same response
-                    has_lcsh = self._check_lcsh_in_bib_record(bib_record)
+                    # Check for LCSH subjects by fetching full record from /bibs endpoint
+                    has_lcsh = self._check_lcsh_in_bib_record(oclc_number)
                     
                     # Since all ISBNs in the query are for the same work,
                     # we can associate the found OCLC number and LCSH status with all of them
@@ -423,7 +488,8 @@ class OCLCISBNMatcher:
                 headers = self._get_headers()
                 
                 # Log API request details
-                url = f"{self.base_url}/worldcat/search/bibs"
+                # API endpoint for WorldCat Metadata API search (using brief-bibs endpoint)
+                url = f"{self.base_url}/worldcat/search/brief-bibs"
                 if self.api_logging:
                     logger.info(f"API Request - Alternative Search ({attempt_name})")
                     logger.info(f"  URL: {url}")
@@ -465,7 +531,8 @@ class OCLCISBNMatcher:
                 if 'bibRecords' in data and data['bibRecords']:
                     bib_record = data['bibRecords'][0]  # Get first result
                     oclc_number = bib_record.get('identifier', {}).get('oclcNumber')
-                    has_lcsh = self._check_lcsh_in_bib_record(bib_record)
+                    # Check for LCSH subjects by fetching full record from /bibs endpoint
+                    has_lcsh = self._check_lcsh_in_bib_record(oclc_number) if oclc_number else False
                     
                     logger.debug(f"Found match {attempt_name}: OCLC {oclc_number}, LCSH: {has_lcsh}")
                     return {
@@ -504,17 +571,66 @@ class OCLCISBNMatcher:
             'has_lcsh': False
         }
     
-    def _check_lcsh_in_bib_record(self, bib_record: dict) -> bool:
+    def _check_lcsh_in_bib_record(self, oclc_number: str) -> bool:
         """
         Check if a bib record contains Library of Congress Subject Headings (LCSH).
+        Fetches the full bibliographic record from the /bibs endpoint to check for LCSH.
         
         Args:
-            bib_record: Full bib record from the API response
+            oclc_number: OCLC number of the record to check
             
         Returns:
             True if the record contains LCSH subjects, False otherwise
         """
+        if not oclc_number:
+            logger.debug("No OCLC number provided for LCSH check")
+            return False
+            
         try:
+            # Fetch full bibliographic record from /bibs endpoint
+            url = f"{self.base_url}/worldcat/bibs/{oclc_number}"
+            headers = self._get_headers()
+            
+            if self.api_logging:
+                logger.info(f"API Request - Fetch Full Bib for LCSH Check")
+                logger.info(f"  URL: {url}")
+                logger.info(f"  Headers: {headers}")
+            
+            self.stats['api_requests'] += 1
+            response = requests.get(url, headers=headers, timeout=self.timeout)
+            
+            # Handle 401 Unauthorized - token may have expired
+            if response.status_code == 401:
+                logger.warning("Received 401 Unauthorized while fetching full bib, refreshing access token...")
+                self._refresh_access_token()
+                headers = self._get_headers()
+                response = requests.get(url, headers=headers, timeout=self.timeout)
+            
+            if self.api_logging:
+                logger.info(f"API Response - Fetch Full Bib for LCSH Check")
+                logger.info(f"  Status Code: {response.status_code}")
+                logger.info(f"  Response Headers: {dict(response.headers)}")
+                logger.info(f"  Response Size: {len(response.content)} bytes")
+            
+            self.stats['api_responses'] += 1
+            
+            # If record not found or other error, return False
+            if response.status_code == 404:
+                logger.debug(f"Record {oclc_number} not found for LCSH check")
+                return False
+            
+            response.raise_for_status()
+            
+            bib_record = response.json()
+            
+            # Log response content (truncated for large responses)
+            if self.api_logging:
+                response_content = str(bib_record)
+                if len(response_content) > 1000:
+                    response_content = response_content[:1000] + "... [truncated]"
+                logger.info(f"  Response Content: {response_content}")
+            
+            # Check for LCSH subjects in the full record
             subjects = bib_record.get('subjects', [])
             
             # Check if any subject has LCSH vocabulary
@@ -524,10 +640,25 @@ class OCLCISBNMatcher:
                     logger.debug(f"Found LCSH subject: {vocabulary}")
                     return True
             
+            logger.debug(f"No LCSH subjects found in record {oclc_number}")
             return False
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed while checking LCSH for OCLC {oclc_number}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"  Response Status: {e.response.status_code}")
+                logger.error(f"  Response Headers: {dict(e.response.headers)}")
+                try:
+                    error_content = e.response.text
+                    if len(error_content) > 500:
+                        error_content = error_content[:500] + "... [truncated]"
+                    logger.error(f"  Response Content: {error_content}")
+                except:
+                    logger.error(f"  Could not read response content")
+            # Return False on error rather than raising
+            return False
         except Exception as e:
-            logger.error(f"Unexpected error checking LCSH in bib record: {e}")
+            logger.error(f"Unexpected error checking LCSH in bib record {oclc_number}: {e}")
             return False
     
     def search_by_isbn(self, isbn: str) -> Optional[str]:

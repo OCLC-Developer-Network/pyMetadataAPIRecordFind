@@ -68,7 +68,13 @@ This project provides tools for processing bibliographic records and matching th
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. **Install project dependencies:**
+2. **Setup and activate virtual environment:**
+   ```bash
+   uv venv my_venv
+   source my_venv/bin/activate
+   ```
+
+3. **Install project dependencies:**
    ```bash
    uv pip install -e .
    ```
@@ -78,7 +84,7 @@ This project provides tools for processing bibliographic records and matching th
    uv pip install -e ".[dev]"
    ```
 
-3. **Configure WorldCat Metadata API credentials:**
+4. **Configure WorldCat Metadata API credentials:**
    
    a. **Get API credentials:**
       - Visit the [OCLC Developer Network](https://www.oclc.org/developer/api/oclc-apis/worldcat-metadata-api.en.html)
@@ -106,7 +112,7 @@ This project provides tools for processing bibliographic records and matching th
       - `LOG_FILE` - Log file path (default: `oclc_matcher.log`)
       - `API_LOGGING` - Enable detailed API logging: true/false (default: `true`)
 
-4. **Verify input file structure:**
+5. **Verify input file structure:**
    - **Excel files**: Script automatically detects ISBN columns by name
    - **MARC files**: Script automatically extracts standard MARC fields
 
@@ -123,24 +129,24 @@ The typical workflow involves two main steps:
 
 **Extract MARC data to Excel:**
 ```bash
-python3 marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o extracted_data.xlsx
+python marc_extractor.py -i sampleData/sample-batch.mrc -o extracted_data.xlsx
 ```
 
 **Analyze MARC field usage:**
 ```bash
-python3 marc_field_analyzer.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o field_analysis.xlsx
+python marc_field_analyzer.py -i sampleData/sample-batch.mrc -o field_analysis.xlsx
 ```
 
 ### Step 2: OCLC Record Matching
 
 **Process Excel file with ISBNs:**
 ```bash
-python3 oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched_output.xlsx
+python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched_output.xlsx
 ```
 
 **Use default files:**
 ```bash
-python3 oclc_record_matcher.py
+python oclc_record_matcher.py
 ```
 
 ### Complete Workflow Example
@@ -148,27 +154,27 @@ python3 oclc_record_matcher.py
 **From MARC to OCLC-matched data:**
 ```bash
 # Step 1: Extract MARC data
-python3 marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o marc_data.xlsx
+python marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o marc_data.xlsx
 
 # Step 2: Match with OCLC API
-python3 oclc_record_matcher.py -i marc_data.xlsx -o final_matched_data.xlsx
+python oclc_record_matcher.py -i marc_data.xlsx -o final_matched_data.xlsx
 ```
 
 ### Advanced Options
 
 **Disable detailed API logging:**
 ```bash
-python3 oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-api-logging
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-api-logging
 ```
 
 **Process without creating backup:**
 ```bash
-python3 oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-backup
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-backup
 ```
 
 **Use different log level:**
 ```bash
-python3 oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG
 ```
 
 ### Command-Line Options
@@ -315,17 +321,17 @@ The field analyzer creates an Excel report with:
 
 **Test MARC field analysis:**
 ```bash
-python3 marc_field_analyzer.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o test_analysis.xlsx
+python marc_field_analyzer.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o test_analysis.xlsx
 ```
 
 **Test MARC extraction:**
 ```bash
-python3 marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o test_extraction.xlsx
+python marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o test_extraction.xlsx
 ```
 
 **Test OCLC matching:**
 ```bash
-python3 oclc_record_matcher.py -i sampleData/testRecords.xlsx -o test_matching.xlsx
+python oclc_record_matcher.py -i sampleData/testRecords.xlsx -o test_matching.xlsx
 ```
 
 ## API Documentation
@@ -334,10 +340,12 @@ This project uses the **WorldCat Metadata API** as documented in the [OpenAPI sp
 
 ### Key Endpoints
 
-- `GET /worldcat/search/bibs` - Search for bibliographic records
+- `GET /worldcat/search/brief-bibs` - Search for brief bibliographic records (optimized for performance)
 - **Authentication**: OAuth 2.0 Client Credentials flow
 - **Base URL**: `https://metadata.api.oclc.org`
 - **OAuth Token URL**: `https://oauth.oclc.org/token`
+
+**Note**: This project uses the `/brief-bibs` endpoint which returns concise bibliographic records with essential information, providing better performance compared to the full `/bibs` endpoint. The brief format includes OCLC numbers, identifiers, and subject information needed for matching operations.
 
 ### Authentication
 
@@ -373,14 +381,14 @@ This project uses `uv` for fast Python package management. Key benefits:
 
 3. **Run scripts:**
    ```bash
-   python3 oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o output.xlsx
+   python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o output.xlsx
    ```
 
 ### Alternative Installation Methods
 
 **Using pip (if uv is not available):**
 ```bash
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 **Using uv with specific Python version:**
