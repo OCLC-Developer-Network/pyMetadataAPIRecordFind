@@ -339,14 +339,14 @@ class OCLCISBNMatcher:
                 logger.info(f"  Response Content: {response_content}")
             
             # Process results and map back to original ISBNs
+            # brief-bibs endpoint returns 'briefRecords' array, not 'bibRecords'
             results = {}
-            bib_records = data.get('bibRecords', [])
+            brief_records = data.get('briefRecords', [])
             
-            if bib_records:
-                bib_record = bib_records[0]
-                # Extract OCLC number from the identifier object
-                identifier = bib_record.get('identifier', {})
-                oclc_number = identifier.get('oclcNumber')
+            if brief_records:
+                brief_record = brief_records[0]
+                # Extract OCLC number directly from brief record (not nested in identifier)
+                oclc_number = brief_record.get('oclcNumber')
                 
                 if oclc_number:
                     # Check for LCSH subjects by fetching full record from /bibs endpoint
@@ -528,9 +528,12 @@ class OCLCISBNMatcher:
                     logger.info(f"  Response Content: {response_content}")
                 
                 # Process results
-                if 'bibRecords' in data and data['bibRecords']:
-                    bib_record = data['bibRecords'][0]  # Get first result
-                    oclc_number = bib_record.get('identifier', {}).get('oclcNumber')
+                # brief-bibs endpoint returns 'briefRecords' array, not 'bibRecords'
+                brief_records = data.get('briefRecords', [])
+                if brief_records:
+                    brief_record = brief_records[0]  # Get first result
+                    # Extract OCLC number directly from brief record (not nested in identifier)
+                    oclc_number = brief_record.get('oclcNumber')
                     # Check for LCSH subjects by fetching full record from /bibs endpoint
                     has_lcsh = self._check_lcsh_in_bib_record(oclc_number) if oclc_number else False
                     
