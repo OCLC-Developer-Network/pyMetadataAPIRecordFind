@@ -122,6 +122,8 @@ This project provides tools for processing bibliographic records and matching th
 
 ## Usage
 
+For **`oclc_record_matcher.py`**, see **Examples** in the [Command-line options](#command-line-options) section below for copy-paste commands grouped by switches.
+
 ### Workflow Overview
 
 Common paths:
@@ -182,28 +184,6 @@ python oclc_record_matcher.py -i marc_data.xlsx -o final_matched_data.xlsx
 python oclc_record_matcher.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o final_matched_data.xlsx
 ```
 
-### Advanced Options
-
-**Disable detailed API logging:**
-```bash
-python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-api-logging
-```
-
-**Process without creating backup:**
-```bash
-python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-backup
-```
-
-**Use different log level:**
-```bash
-python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG
-```
-
-**MARCXML export after matching (requires manage bibs / view MARC scope on the key):**
-```bash
-python oclc_record_matcher.py -i input.xlsx -o output.xlsx --marcxml-output bibs.xml
-```
-
 ### Command-Line Options
 
 #### OCLC Record Matcher (`oclc_record_matcher.py`)
@@ -219,6 +199,91 @@ python oclc_record_matcher.py -i input.xlsx -o output.xlsx --marcxml-output bibs
 | `--no-api-logging` | Disable detailed API request/response logging | Enable API logging |
 | `-h, --help` | Show help message | - |
 
+### Examples: `oclc_record_matcher.py`
+
+Use `python` or `uv run python` (from the project root with the venv active).
+
+#### Input and output (`-i`, `-o`)
+
+```bash
+# Explicit Excel input and output paths
+python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o results/matched.xlsx
+
+# CSV or TSV (UTF-8); output is always an Excel workbook when -o is set
+python oclc_record_matcher.py -i data/titles.csv -o data/titles_with_oclc.xlsx
+python oclc_record_matcher.py -i data/titles.tsv -o data/titles_with_oclc.xlsx
+
+# Binary MARC: matcher extracts to a temp sheet, then writes your -o Excel
+python oclc_record_matcher.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o matched_from_marc.xlsx
+
+# Use default sample input; output defaults to sampleData/recordsToMatch_with_oclc.xlsx
+python oclc_record_matcher.py
+```
+
+#### MARCXML export (`--marcxml-output`)
+
+Requires API key scopes that allow **manage bibs** / **view MARC** (see [API documentation](#api-documentation) below).
+
+```bash
+# Excel results plus one combined MARCXML file for distinct matched OCLC numbers
+python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched.xlsx --marcxml-output exports/bibs.xml
+
+# Same, from a UTF-8 CSV
+python oclc_record_matcher.py -i data/books.csv -o data/books_with_oclc.xlsx --marcxml-output exports/books.xml
+```
+
+#### MARCXML only (omit `-o`)
+
+No `.xlsx` is written; matching still runs in memory, then MARCXML is fetched.
+
+```bash
+python oclc_record_matcher.py -i data/books.csv --marcxml-output exports/books_only.xml
+python oclc_record_matcher.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc --marcxml-output exports/from_marc.xml
+```
+
+#### Backups (`--no-backup`)
+
+By default the matcher copies the **input** file to `INPUT.backup_YYYYMMDD_HHMMSS` before processing.
+
+```bash
+# Skip creating that backup (useful for large inputs or CI)
+python oclc_record_matcher.py -i big_list.csv -o big_list_with_oclc.xlsx --no-backup
+```
+
+#### Logging (`--log-level`, `--log-file`, `--no-api-logging`)
+
+```bash
+# Verbose application logging (row details, timing, etc.)
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG
+
+# Write logs to a specific file (still mirrors to console unless you rely on your shell)
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-file logs/matcher-run.log
+
+# Quieter HTTP: turn off per-request URL/body logging from the client
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-api-logging
+
+# Typical “deep debug” combo
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG --log-file logs/debug.log
+```
+
+#### Combined switches
+
+```bash
+# MARCXML + no input backup + quieter API trace + custom log file
+python oclc_record_matcher.py -i data/list.xlsx -o data/list_with_oclc.xlsx \
+  --marcxml-output data/list_bibs.xml --no-backup --no-api-logging --log-file logs/oclc.log
+
+# MARCXML-only run with DEBUG and no backup
+python oclc_record_matcher.py -i data/list.csv --marcxml-output data/list.xml \
+  --no-backup --log-level DEBUG
+```
+
+#### Help (`-h`, `--help`)
+
+```bash
+python oclc_record_matcher.py -h
+```
+
 #### MARC Extractor (`marc_extractor.py`)
 
 | Option | Description | Default |
@@ -227,6 +292,11 @@ python oclc_record_matcher.py -i input.xlsx -o output.xlsx --marcxml-output bibs
 | `-o, --output` | Output Excel file path | Required |
 | `-h, --help` | Show help message | - |
 
+```bash
+python marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o extracted.xlsx
+python marc_extractor.py -h
+```
+
 #### MARC Field Analyzer (`marc_field_analyzer.py`)
 
 | Option | Description | Default |
@@ -234,6 +304,11 @@ python oclc_record_matcher.py -i input.xlsx -o output.xlsx --marcxml-output bibs
 | `-i, --input` | Input MARC file path | Required |
 | `-o, --output` | Output Excel file path | Required |
 | `-h, --help` | Show help message | - |
+
+```bash
+python marc_field_analyzer.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o analysis.xlsx
+python marc_field_analyzer.py -h
+```
 
 ## OCLC Search Methods
 
