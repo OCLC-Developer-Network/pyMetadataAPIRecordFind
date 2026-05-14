@@ -1,17 +1,20 @@
 # OCLC Record Matcher
 
-This project provides tools for processing bibliographic records and matching them with OCLC data. It includes scripts for extracting data from MARC files, analyzing MARC field usage, and matching records against the WorldCat Metadata API.
+This project provides tools for processing bibliographic records and matching them with OCLC data. It includes scripts for extracting data from MARC files, analyzing MARC field usage, and matching records against the WorldCat Metadata API—including **Excel, CSV, and TSV** inputs, **direct MARC** matching, and optional **combined MARCXML** export for matched OCLC numbers.
 
 ## Features
 
 ### OCLC Record Matching (`oclc_record_matcher.py`)
-- **Excel File Processing**: Processes Excel files with ISBN columns
-- **Multi-ISBN Support**: Automatically detects and processes multiple ISBN columns (XML ISBN, HC ISBN, PB ISBN, ePub ISBN, ePDF ISBN)
-- **OR Query Optimization**: Combines all ISBNs from the same row in single API calls
-- **Alternative Search**: When no ISBN is available, searches using title, author, publisher, and publication date
-- **Format-Based Search**: Maps format types to appropriate OCLC API parameters
-- **LCSH Detection**: Identifies Library of Congress Subject Headings in matched records
-- **Comprehensive Logging**: Detailed API request/response logging with configurable verbosity
+- **Tabular input**: Excel (`.xlsx`, `.xls`), UTF-8 **CSV**, or UTF-8 **TSV** with ISBN columns (same column detection rules as Excel)
+- **MARC input**: `.mrc` / `.marc` files are converted via the bundled extractor to a temporary workbook, then matched like other inputs
+- **Multi-ISBN support**: Automatically detects and processes multiple ISBN columns (for example XML ISBN, HC ISBN, PB ISBN, ePub ISBN, ePDF ISBN)
+- **OR query optimization**: Combines all ISBNs from the same row in a single brief-bibs API call
+- **Alternative search**: When no ISBN is available, searches using title, author, publisher, and publication date
+- **Format-based search**: Maps format types to appropriate OCLC API parameters
+- **LCSH detection**: Identifies Library of Congress Subject Headings in matched records (via full bib JSON where applicable)
+- **MARCXML export**: Optional combined **MARCXML** file for distinct matched OCLC numbers using `GET /worldcat/manage/bibs/{oclcNumber}` (`--marcxml-output`)
+- **MARC-only runs**: If you pass `--marcxml-output` and **omit** `-o`, no Excel file is written; you only get the combined MARCXML (matching still runs in memory)
+- **Comprehensive logging**: Detailed API request/response logging with configurable verbosity
 
 ### MARC Data Extraction (`marc_extractor.py`)
 - **MARC Field Extraction**: Extracts data from standard MARC fields:
@@ -31,16 +34,16 @@ This project provides tools for processing bibliographic records and matching th
 
 ### OCLC API Integration
 - **WorldCat Metadata API**: Uses the official WorldCat Metadata API with OAuth 2.0 authentication
-- **Secure Credential Management**: Uses environment variables via `python-dotenv` for API keys and secrets
-- **OAuth 2.0 Authentication**: Automatic token management with client credentials flow
-- **Smart Parameter Mapping**: Automatically maps format types to `itemType` or `itemSubType` parameters
-- **Rate Limiting**: Built-in delays to respect API rate limits (configurable)
-- **Error Handling**: Comprehensive error handling with automatic token refresh on 401 errors
+- **Secure credential management**: Environment variables via `python-dotenv` for API keys and secrets
+- **OAuth 2.0 authentication**: Automatic token management with client credentials flow
+- **Smart parameter mapping**: Maps format types to `itemType` or `itemSubType` for brief-bibs search
+- **Rate limiting**: Configurable delay between requests (`API_RATE_LIMIT_DELAY`), applied to search and MARCXML retrieval
+- **Error handling**: Automatic token refresh on `401` responses; resilient handling of per-record failures during export
 
 ## Files
 
 ### Main Scripts
-- `oclc_record_matcher.py` - OCLC API matching for Excel files with ISBNs
+- `oclc_record_matcher.py` - OCLC API matching for Excel, CSV, TSV, or MARC input; optional combined MARCXML export
 - `marc_extractor.py` - Extract MARC data to Excel format
 - `marc_field_analyzer.py` - Analyze MARC field usage and frequency
 
@@ -113,17 +116,19 @@ This project provides tools for processing bibliographic records and matching th
       - `API_LOGGING` - Enable detailed API logging: true/false (default: `true`)
 
 5. **Verify input file structure:**
-   - **Excel files**: Script automatically detects ISBN columns by name
-   - **MARC files**: Script automatically extracts standard MARC fields
+   - **Excel**: ISBN columns are detected when the header contains `ISBN` (case-insensitive substring)
+   - **CSV / TSV**: UTF-8 (optional BOM); same header rules as Excel; comma for `.csv`, tab for `.tsv`
+   - **MARC (`.mrc` / `.marc`)**: Standard fields are extracted to columns via `marc_extractor` before matching
 
 ## Usage
 
 ### Workflow Overview
 
-The typical workflow involves two main steps:
+Common paths:
 
-1. **Extract MARC data to Excel** (if starting with MARC files)
-2. **Match records with OCLC API** (for Excel files with ISBNs)
+1. **From MARC**: Extract to Excel with `marc_extractor.py`, then match with `oclc_record_matcher.py`, **or** run the matcher directly on the `.mrc` file (it extracts to a temporary workbook).
+2. **From Excel / CSV / TSV**: Run `oclc_record_matcher.py` on the file; default output is an Excel workbook with `matchingOCLCNumber` and related columns.
+3. **MARCXML only**: Run the matcher with `--marcxml-output records.xml` and **omit** `-o` to skip writing an `.xlsx` file while still downloading full MARCXML for matched OCLC numbers.
 
 ### Step 1: MARC Data Extraction
 
@@ -139,12 +144,28 @@ python marc_field_analyzer.py -i sampleData/sample-batch.mrc -o field_analysis.x
 
 ### Step 2: OCLC Record Matching
 
-**Process Excel file with ISBNs:**
+**Process Excel (default sample input):**
 ```bash
 python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched_output.xlsx
 ```
 
-**Use default files:**
+**Process CSV or TSV (UTF-8):**
+```bash
+python oclc_record_matcher.py -i my_records.csv -o matched_output.xlsx
+python oclc_record_matcher.py -i my_records.tsv -o matched_output.xlsx
+```
+
+**Excel plus combined MARCXML for matched OCLC numbers:**
+```bash
+python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched_output.xlsx --marcxml-output matched_bibs.xml
+```
+
+**MARCXML only (no Excel output):**
+```bash
+python oclc_record_matcher.py -i my_records.csv --marcxml-output matched_bibs.xml
+```
+
+**Use default input (sample Excel):**
 ```bash
 python oclc_record_matcher.py
 ```
@@ -153,11 +174,12 @@ python oclc_record_matcher.py
 
 **From MARC to OCLC-matched data:**
 ```bash
-# Step 1: Extract MARC data
+# Option A: Two-step (explicit Excel in the middle)
 python marc_extractor.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o marc_data.xlsx
-
-# Step 2: Match with OCLC API
 python oclc_record_matcher.py -i marc_data.xlsx -o final_matched_data.xlsx
+
+# Option B: One-step (matcher extracts MARC to a temp workbook internally)
+python oclc_record_matcher.py -i sampleData/MLN-cataloging-RFP-vendor-sample-batch.mrc -o final_matched_data.xlsx
 ```
 
 ### Advanced Options
@@ -177,14 +199,20 @@ python oclc_record_matcher.py -i input.xlsx -o output.xlsx --no-backup
 python oclc_record_matcher.py -i input.xlsx -o output.xlsx --log-level DEBUG
 ```
 
+**MARCXML export after matching (requires manage bibs / view MARC scope on the key):**
+```bash
+python oclc_record_matcher.py -i input.xlsx -o output.xlsx --marcxml-output bibs.xml
+```
+
 ### Command-Line Options
 
 #### OCLC Record Matcher (`oclc_record_matcher.py`)
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-i, --input` | Input Excel file path | `sampleData/recordsToMatch.xlsx` |
-| `-o, --output` | Output Excel file path | `input_file_with_oclc.xlsx` |
+| `-i, --input` | Input path: `.xlsx` / `.xls`, `.csv`, `.tsv`, or `.mrc` / `.marc` | `sampleData/recordsToMatch.xlsx` |
+| `-o, --output` | Output Excel (`.xlsx`). Optional when `--marcxml-output` is set; omit `-o` for MARCXML-only | `<input_stem>_with_oclc.xlsx` |
+| `--marcxml-output FILE` | After matching, write one combined MARCXML file (manage bibs) for distinct matched OCLC numbers | (disabled) |
 | `--no-backup` | Skip creating backup of input file | Create backup |
 | `--log-level` | Set logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `--log-file` | Custom log file path | `oclc_matcher.log` |
@@ -236,11 +264,18 @@ The script intelligently maps format types to OCLC API parameters:
 ## Output
 
 ### OCLC Record Matcher Output
-The OCLC matcher creates a new Excel file with:
-- All original data from the input file
-- New `matchingOCLCNumber` column containing OCLC numbers for matched records
-- New `hasLCSHSubjects` column indicating Library of Congress Subject Headings presence
-- `None` values for records that couldn't be matched
+
+**Excel (when `-o` is used or defaulted):** A new workbook with:
+
+- All original columns from the input sheet
+- `matchingOCLCNumber` — OCLC number when a match is found
+- `hasLCSHSubjects` — whether LCSH-style subjects were detected in the supporting bib check
+- `Other Identifier` — propagated when present in the source column mapping
+- Empty cells / missing values where no match was found
+
+**MARCXML (when `--marcxml-output` is set):** One UTF-8 XML document whose root is a [MARC 21 slim](http://www.loc.gov/MARC21/slim) `collection` containing one `record` per successfully retrieved OCLC number (order follows first appearance among matches; duplicates are collapsed). Failed lookups are skipped with log warnings.
+
+If you omit `-o` but pass `--marcxml-output`, **no** Excel file is produced; only the MARCXML file (plus logs).
 
 ### MARC Extractor Output
 The MARC extractor creates an Excel file with:
@@ -262,12 +297,12 @@ The field analyzer creates an Excel report with:
 ## Logging and Monitoring
 
 ### OCLC Record Matcher Logging
-- **API Request Details**: URL, parameters, headers, query structure
-- **Response Details**: Status code, headers, response size, content (truncated)
-- **Error Logging**: Detailed error information with response content
-- **Statistics**: API usage statistics and success rates
-- **Progress Tracking**: Real-time progress updates with ETA calculations
-- **Row-by-Row Details**: Detailed processing information for each record
+- **API request details**: URL, parameters, headers, query structure
+- **Response details**: Status code, headers, response size, content (truncated where large)
+- **Error logging**: Detailed error information with response bodies when available
+- **Statistics**: API usage, success rates, and (when used) manage-bib MARCXML fetch counts
+- **Progress tracking**: Real-time progress with ETA during row processing
+- **Row-by-row details**: Per-record processing messages at verbose log levels
 
 ### Log Levels
 - **INFO**: Standard processing information
@@ -306,16 +341,18 @@ The field analyzer creates an Excel report with:
    uv pip install -e .
    ```
 
-2. **File Format Issues**: 
-   - Excel files: Check column names and file format
-   - MARC files: Ensure proper MARC21 format
+2. **File format issues**: 
+   - Excel: Check column names (ISBN columns must include `ISBN` in the header)
+   - CSV / TSV: Use UTF-8 encoding; ensure the correct extension (`.csv` vs `.tsv`) for delimiter detection
+   - MARC: Ensure valid MARC21 binary (`.mrc` / `.marc`)
 
 3. **Network Issues**: The OCLC matcher includes timeout handling and will log any connection problems
 
-4. **API Authentication Issues**: 
+4. **API authentication and scopes**: 
    - Ensure `OCLC_API_KEY` and `OCLC_API_SECRET` are set in your `.env` file
-   - Verify your credentials are correct at the [OCLC Developer Network](https://www.oclc.org/developer/api/oclc-apis/worldcat-metadata-api.en.html)
-   - Check that your API key has the required scopes: `WorldCatMetadataAPI:read_bibs` and `WorldCatMetadataAPI:match_bibs`
+   - Verify your credentials at the [OCLC Developer Network](https://www.oclc.org/developer/api/oclc-apis/worldcat-metadata-api.en.html)
+   - Matching uses search and bib read patterns; ensure the WSKey is enabled for **WorldCat Metadata API** with appropriate scopes (for example **`WorldCatMetadataAPI:match_bibs`** and **`WorldCatMetadataAPI:read_bibs`** where required for your workflow)
+   - **`--marcxml-output`** calls **`GET /worldcat/manage/bibs/{oclcNumber}`** with `Accept: application/marcxml+xml`; the key needs **`WorldCatMetadataAPI:manage_bibs`** and/or **`WorldCatMetadataAPI:view_marc_bib`** per the [OpenAPI security requirements](https://developer.api.oclc.org/docs/wc-metadata/openapi-external-prod.yaml)
 
 ### Testing
 
@@ -340,12 +377,17 @@ This project uses the **WorldCat Metadata API** as documented in the [OpenAPI sp
 
 ### Key Endpoints
 
-- `GET /worldcat/search/brief-bibs` - Search for brief bibliographic records (optimized for performance)
-- **Authentication**: OAuth 2.0 Client Credentials flow
-- **Base URL**: `https://metadata.api.oclc.org`
-- **OAuth Token URL**: `https://oauth.oclc.org/token`
+| Operation | HTTP | Path | Role in this project |
+|-----------|------|------|----------------------|
+| Brief search | `GET` | `/worldcat/search/brief-bibs` | Primary ISBN / title-author matching; returns `oclcNumber` among other brief fields |
+| Full bib (JSON) | `GET` | `/worldcat/bibs/{oclcNumber}` | LCSH-style subject check on the retrieved bib (`Accept: application/json`) |
+| Manage bib (MARCXML) | `GET` | `/worldcat/manage/bibs/{oclcNumber}` | Optional export: full bibliographic record as MARCXML (`Accept: application/marcxml+xml`) |
 
-**Note**: This project uses the `/brief-bibs` endpoint which returns concise bibliographic records with essential information, providing better performance compared to the full `/bibs` endpoint. The brief format includes OCLC numbers, identifiers, and subject information needed for matching operations.
+- **Authentication**: OAuth 2.0 client credentials
+- **Base URL**: `https://metadata.api.oclc.org` (override with `OCLC_API_BASE_URL` if needed)
+- **OAuth token URL**: `https://oauth.oclc.org/token`
+
+The matcher favors **brief-bibs** for discovery because it is efficient for high-volume matching. Full **MARCXML** for holdings or cataloging workflows is fetched only when you pass **`--marcxml-output`**, using the **manage bibs** read operation described in the [OpenAPI specification](https://developer.api.oclc.org/docs/wc-metadata/openapi-external-prod.yaml).
 
 ### Authentication
 

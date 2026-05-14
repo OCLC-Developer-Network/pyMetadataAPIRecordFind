@@ -18,13 +18,14 @@ OCLC ISBN Matcher - WorldCat Metadata API Version
 
 This script reads ISBNs from a spreadsheet (Excel, CSV, or TSV), searches the
 WorldCat Metadata API for matching records, and adds the OCLC numbers to a new
-column in the output Excel file.
+column in the output Excel file (unless you request MARCXML-only output).
 
 Features:
 - Accepts Excel (.xlsx/.xls), UTF-8 CSV, UTF-8 TSV, or MARC (.mrc/.marc) input
 - Handles multiple ISBN columns (XML ISBN, HC ISBN, PB ISBN, ePub ISBN, ePDF ISBN)
 - Maps format types to appropriate itemSubType parameters for API calls
 - Searches WorldCat Metadata API with OAuth 2.0 authentication
+- Optional: write only combined MARCXML (no Excel) when ``--marcxml-output`` is set without ``-o``
 - Adds rate limiting and error handling
 - Provides detailed logging and progress tracking
 - Creates backup of original file
@@ -33,6 +34,7 @@ Features:
 
 import openpyxl
 import csv
+import re
 import requests
 from requests_oauthlib import OAuth2Session
 from oauthlib.oauth2 import BackendApplicationClient
@@ -117,8 +119,11 @@ class OCLCISBNMatcher:
             'lcsh_found': 0,
             'lcsh_not_found': 0,
             'api_requests': 0,
-            'api_responses': 0
+            'api_responses': 0,
+            'marcxml_manage_fetches': 0,
+            'marcxml_manage_failures': 0,
         }
+        self._marcxml_oclc_order: List[str] = []
     
     def _refresh_access_token(self):
         """
@@ -212,6 +217,215 @@ class OCLCISBNMatcher:
             'Accept': 'application/json',
             'Authorization': f'Bearer {self.access_token}'
         }
+
+    def _get_marcxml_headers(self) -> Dict[str, str]:
+        """HTTP headers for MARCXML responses from the manage bibs endpoint."""
+        return {
+            'Accept': 'application/marcxml+xml',
+            'Authorization': f'Bearer {self.access_token}',
+        }
+
+    @staticmethod
+    def _normalize_oclc_number_for_api(value: Any) -> Optional[str]:
+        """Return a numeric OCLC identifier string suitable for URL paths, or None."""
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            if value != value:  # NaN
+                return None
+            rounded = round(value)
+            if abs(value - rounded) < 1e-9:
+                return str(int(rounded))
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        upper = s.upper()
+        if upper.startswith('OCN'):
+            s = s[3:].strip()
+        elif upper.startswith('OCM'):
+            s = s[3:].strip()
+        if re.fullmatch(r'\d+', s):
+            return s
+        return None
+
+    def _register_oclc_for_marcxml_export(self, oclc_number: Any) -> None:
+        """Remember an OCLC number written to the sheet for optional MARCXML export."""
+        sid = self._normalize_oclc_number_for_api(oclc_number)
+        if sid:
+            self._marcxml_oclc_order.append(sid)
+
+    @staticmethod
+    def _strip_xml_declaration(xml_text: str) -> str:
+        """Remove XML declaration so fragments can be wrapped in a collection."""
+        t = xml_text.strip()
+        if t.startswith('<?xml'):
+            end = t.find('?>')
+            if end != -1:
+                return t[end + 2 :].strip()
+        return t
+
+    @staticmethod
+    def _combine_marcxml_record_bodies(record_bodies: List[str]) -> str:
+        """
+        Wrap stripped MARCXML record fragments in a single MARC21 slim collection.
+
+        Args:
+            record_bodies: Pieces of XML each containing one ``record`` element
+
+        Returns:
+            Full MARCXML document as a UTF-8 string.
+        """
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<collection xmlns="http://www.loc.gov/MARC21/slim">',
+        ]
+        for body in record_bodies:
+            lines.append(OCLCISBNMatcher._strip_xml_declaration(body))
+        lines.append('</collection>')
+        return '\n'.join(lines) + '\n'
+
+    def fetch_manage_bib_marcxml(self, oclc_number: str) -> Optional[str]:
+        """
+        Retrieve one bibliographic record as MARCXML from the manage bibs API.
+
+        Uses ``GET /worldcat/manage/bibs/{oclcNumber}`` with
+        ``Accept: application/marcxml+xml`` per the WorldCat Metadata API spec.
+        Requires credentials with ``WorldCatMetadataAPI:manage_bibs`` or
+        ``WorldCatMetadataAPI:view_marc_bib`` on the key.
+
+        Args:
+            oclc_number: OCLC control number
+
+        Returns:
+            Response body (MARCXML), or None if the record is missing or on error.
+        """
+        oclc_id = self._normalize_oclc_number_for_api(oclc_number)
+        if not oclc_id:
+            logger.warning('Skipping MARCXML fetch: invalid OCLC number %r', oclc_number)
+            return None
+
+        url = f'{self.base_url}/worldcat/manage/bibs/{oclc_id}'
+        headers = self._get_marcxml_headers()
+
+        if self.api_logging:
+            logger.info('API Request - Manage Bib MARCXML read')
+            logger.info('  URL: %s', url)
+            logger.info('  Headers: %s', headers)
+
+        try:
+            self.stats['api_requests'] += 1
+            response = requests.get(url, headers=headers, timeout=self.timeout)
+
+            if response.status_code == 401:
+                logger.warning(
+                    'Received 401 Unauthorized on manage bib read, refreshing access token...'
+                )
+                self._refresh_access_token()
+                headers = self._get_marcxml_headers()
+                response = requests.get(url, headers=headers, timeout=self.timeout)
+
+            if self.api_logging:
+                logger.info('API Response - Manage Bib MARCXML read')
+                logger.info('  Status Code: %s', response.status_code)
+                logger.info('  Response Headers: %s', dict(response.headers))
+
+            self.stats['api_responses'] += 1
+
+            if response.status_code == 404:
+                logger.warning('No MARCXML for OCLC %s (HTTP 404)', oclc_id)
+                self.stats['marcxml_manage_failures'] += 1
+                return None
+
+            response.raise_for_status()
+
+            body = response.text
+            if not body or not body.strip():
+                logger.warning('Empty MARCXML body for OCLC %s', oclc_id)
+                self.stats['marcxml_manage_failures'] += 1
+                return None
+
+            ct = (response.headers.get('Content-Type') or '').lower()
+            if 'json' in ct:
+                logger.error(
+                    'Unexpected JSON from manage bib read for OCLC %s: %s',
+                    oclc_id,
+                    body[:500],
+                )
+                self.stats['api_errors'] += 1
+                self.stats['marcxml_manage_failures'] += 1
+                return None
+
+            self.stats['marcxml_manage_fetches'] += 1
+            return body
+
+        except requests.exceptions.RequestException as exc:
+            logger.error('Manage bib MARCXML request failed for OCLC %s: %s', oclc_id, exc)
+            if getattr(exc, 'response', None) is not None:
+                resp = exc.response
+                logger.error('  Status: %s', resp.status_code)
+                try:
+                    err = resp.text
+                    if len(err) > 500:
+                        err = err[:500] + '... [truncated]'
+                    logger.error('  Body: %s', err)
+                except OSError:
+                    pass
+            self.stats['api_errors'] += 1
+            self.stats['marcxml_manage_failures'] += 1
+            return None
+
+    def download_matched_bibs_marcxml(self, output_path: str) -> int:
+        """
+        Download MARCXML for each distinct matched OCLC number and save one file.
+
+        Order follows first appearance in the processed spreadsheet. Each bib is
+        fetched with ``GET /worldcat/manage/bibs/{oclcNumber}``; results are
+        combined under a single ``collection`` root (MARC21 slim namespace).
+
+        Args:
+            output_path: Path to write the combined ``.xml`` file (UTF-8).
+
+        Returns:
+            Number of records successfully included in the output file.
+        """
+        seen: set = set()
+        unique_ids: List[str] = []
+        for raw in self._marcxml_oclc_order:
+            sid = self._normalize_oclc_number_for_api(raw)
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            unique_ids.append(sid)
+
+        if not unique_ids:
+            logger.info('No matched OCLC numbers to download for MARCXML export.')
+            return 0
+
+        logger.info(
+            'Downloading MARCXML for %s distinct OCLC number(s) via manage bibs...',
+            len(unique_ids),
+        )
+
+        bodies: List[str] = []
+        for oclc_id in unique_ids:
+            fragment = self.fetch_manage_bib_marcxml(oclc_id)
+            if fragment:
+                bodies.append(fragment)
+            time.sleep(self.rate_limit_delay)
+
+        if not bodies:
+            logger.warning('MARCXML export skipped: no records retrieved.')
+            return 0
+
+        combined = self._combine_marcxml_record_bodies(bodies)
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(combined, encoding='utf-8')
+        logger.info('Wrote combined MARCXML (%s records) to %s', len(bodies), out)
+        return len(bodies)
     
     def print_api_statistics(self):
         """Print API usage statistics."""
@@ -221,6 +435,14 @@ class OCLCISBNMatcher:
         logger.info(f"Total API Requests: {self.stats['api_requests']}")
         logger.info(f"Total API Responses: {self.stats['api_responses']}")
         logger.info(f"API Errors: {self.stats['api_errors']}")
+        logger.info(
+            "Manage-bib MARCXML fetches (successful): %s",
+            self.stats['marcxml_manage_fetches'],
+        )
+        logger.info(
+            "Manage-bib MARCXML failures: %s",
+            self.stats['marcxml_manage_failures'],
+        )
         if self.stats['api_requests'] > 0:
             success_rate = ((self.stats['api_requests'] - self.stats['api_errors']) / self.stats['api_requests']) * 100
             logger.info(f"API Success Rate: {success_rate:.1f}%")
@@ -1014,15 +1236,18 @@ class OCLCISBNMatcher:
                     )
         return workbook
 
-    def _process_workbook(self, workbook: openpyxl.Workbook, output_file: str) -> None:
+    def _process_workbook(
+        self, workbook: openpyxl.Workbook, output_file: Optional[str] = None
+    ) -> None:
         """
-        Run OCLC matching on the active sheet and save to an Excel file.
+        Run OCLC matching on the active sheet and optionally save to an Excel file.
 
         Args:
             workbook: Loaded or constructed workbook (active sheet is processed)
-            output_file: Path to the output .xlsx file
+            output_file: Path to the output .xlsx file, or None to skip writing Excel
         """
         worksheet = workbook.active
+        self._marcxml_oclc_order = []
 
         # Find all ISBN columns
         isbn_columns = self.find_isbn_columns(worksheet)
@@ -1146,6 +1371,7 @@ class OCLCISBNMatcher:
                 # Add OCLC number to the new column
                 oclc_cell = worksheet.cell(row=row, column=oclc_col)
                 oclc_cell.value = oclc_number
+                self._register_oclc_for_marcxml_export(oclc_number)
                 
                 # Add LCSH result to the new column
                 lcsh_cell = worksheet.cell(row=row, column=lcsh_col)
@@ -1223,6 +1449,7 @@ class OCLCISBNMatcher:
             # Add OCLC number to the new column
             oclc_cell = worksheet.cell(row=row, column=oclc_col)
             oclc_cell.value = oclc_number
+            self._register_oclc_for_marcxml_export(oclc_number)
             
             # Add LCSH result to the new column
             lcsh_cell = worksheet.cell(row=row, column=lcsh_col)
@@ -1263,21 +1490,29 @@ class OCLCISBNMatcher:
                 logger.info(f"Processed {row - 1}/{total_rows - 1} rows "
                           f"({rate:.1f} rows/sec, ETA: {eta/60:.1f} minutes)")
         
-        # Save the updated Excel file
-        logger.info(f"Saving results to: {output_file}")
-        workbook.save(output_file)
+        # Save the updated Excel file (optional when only MARCXML export is requested)
+        if output_file:
+            logger.info(f"Saving results to: {output_file}")
+            workbook.save(output_file)
+        else:
+            logger.info("Skipping Excel output (MARCXML-only run).")
         
         # Print final summary
         elapsed_time = time.time() - start_time
         self.print_summary(elapsed_time)
 
-    def process_excel_file(self, input_file: str, output_file: str, create_backup: bool = True):
+    def process_excel_file(
+        self,
+        input_file: str,
+        output_file: Optional[str] = None,
+        create_backup: bool = True,
+    ) -> None:
         """
         Process Excel file to add OCLC numbers using OR queries for ISBNs from the same row.
 
         Args:
             input_file: Path to input Excel file (.xlsx)
-            output_file: Path to output Excel file
+            output_file: Path to output Excel file, or None to skip writing a spreadsheet
             create_backup: Whether to create a backup of the input file
         """
         try:
@@ -1293,16 +1528,16 @@ class OCLCISBNMatcher:
     def process_delimited_file(
         self,
         input_file: str,
-        output_file: str,
-        delimiter: str,
+        output_file: Optional[str] = None,
+        delimiter: str = ",",
         create_backup: bool = True,
     ) -> None:
         """
-        Process a CSV or TSV file (UTF-8 with optional BOM) and write results to an Excel file.
+        Process a CSV or TSV file (UTF-8 with optional BOM) and optionally write an Excel file.
 
         Args:
             input_file: Path to input CSV or TSV
-            output_file: Path to output .xlsx file
+            output_file: Path to output .xlsx file, or None to skip writing a spreadsheet
             delimiter: Field delimiter for csv.reader (comma or tab)
             create_backup: Whether to create a backup of the input file
         """
@@ -1418,6 +1653,12 @@ Examples:
   
   # Use different log level
   python3 oclc_record_matcher.py -i books.xlsx --log-level DEBUG
+
+  # After matching, save full MARCXML for distinct matched OCLC numbers (manage bibs)
+  python3 oclc_record_matcher.py -i books.xlsx -o out.xlsx --marcxml-output matched_bibs.xml
+
+  # MARCXML only (no Excel): omit -o when using --marcxml-output
+  python3 oclc_record_matcher.py -i books.csv --marcxml-output matched_bibs.xml
         """
     )
     
@@ -1429,7 +1670,11 @@ Examples:
     
     parser.add_argument(
         '-o', '--output',
-        help='Output Excel file path (default: input_file_with_oclc.xlsx)'
+        help=(
+            'Output Excel (.xlsx). Optional when --marcxml-output is set: omit -o to skip '
+            'the spreadsheet and only write the combined MARCXML file. '
+            'If both are omitted, defaults to <input_stem>_with_oclc.xlsx.'
+        ),
     )
     
     parser.add_argument(
@@ -1454,6 +1699,16 @@ Examples:
         '--no-api-logging',
         action='store_true',
         help='Disable detailed API request/response logging (reduces log verbosity)'
+    )
+
+    parser.add_argument(
+        '--marcxml-output',
+        metavar='FILE',
+        help=(
+            'After matching, write combined MARCXML for distinct matched OCLC numbers '
+            'to FILE (GET /worldcat/manage/bibs/{oclcNumber}); requires manage_bibs or '
+            'view_marc_bib on the API key. Omit -o to produce only this file (no Excel).'
+        ),
     )
     
     return parser.parse_args()
@@ -1492,13 +1747,17 @@ def main():
     
     # Determine input and output files
     input_file = args.input
-    if args.output:
-        output_file = args.output
+    marcxml_out = args.marcxml_output
+    explicit_output = bool(args.output and str(args.output).strip())
+
+    if explicit_output:
+        output_file: Optional[str] = args.output
+    elif marcxml_out:
+        output_file = None
     else:
-        # Generate output filename based on input filename
         base_name = os.path.splitext(input_file)[0]
         output_file = f"{base_name}_with_oclc.xlsx"
-    
+
     # Check if input file exists
     if not os.path.exists(input_file):
         logger.error(f"Input file not found: {input_file}")
@@ -1512,9 +1771,16 @@ def main():
         logger.info("Supported file types: .xlsx, .xls, .csv, .tsv, .mrc, .marc")
         sys.exit(1)
     
-    # Check if output file already exists
-    if os.path.exists(output_file):
+    # Check if output files already exist
+    if output_file and os.path.exists(output_file):
         logger.warning(f"Output file already exists: {output_file}")
+        response = input("Do you want to overwrite it? (y/N): ")
+        if response.lower() not in ['y', 'yes']:
+            logger.info("Operation cancelled by user.")
+            sys.exit(0)
+
+    if marcxml_out and os.path.exists(marcxml_out):
+        logger.warning(f"MARCXML output file already exists: {marcxml_out}")
         response = input("Do you want to overwrite it? (y/N): ")
         if response.lower() not in ['y', 'yes']:
             logger.info("Operation cancelled by user.")
@@ -1526,9 +1792,14 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Input file: {input_file}")
     logger.info(f"Input file type: {file_type}")
-    logger.info(f"Output file: {output_file}")
+    if output_file:
+        logger.info(f"Output Excel file: {output_file}")
+    else:
+        logger.info("Output Excel file: (skipped; MARCXML-only)")
     logger.info(f"Create backup: {not args.no_backup}")
     logger.info(f"Log level: {args.log_level}")
+    if marcxml_out:
+        logger.info(f"MARCXML export file: {marcxml_out}")
     logger.info("=" * 60)
     
     # Create matcher instance with OAuth 2.0 authentication
@@ -1570,7 +1841,10 @@ def main():
             matcher.process_excel_file(
                 input_file, output_file, create_backup=not args.no_backup
             )
-        
+
+        if marcxml_out:
+            matcher.download_matched_bibs_marcxml(marcxml_out)
+
         # Print API statistics
         matcher.print_api_statistics()
         
