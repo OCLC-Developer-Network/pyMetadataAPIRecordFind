@@ -16,10 +16,12 @@
 """
 OCLC ISBN Matcher - WorldCat Metadata API Version
 
-This script reads ISBNs from an Excel file, searches the WorldCat Metadata API
-for matching records, and adds the OCLC numbers to a new column in the spreadsheet.
+This script reads ISBNs from a spreadsheet (Excel, CSV, or TSV), searches the
+WorldCat Metadata API for matching records, and adds the OCLC numbers to a new
+column in the output Excel file.
 
 Features:
+- Accepts Excel (.xlsx/.xls), UTF-8 CSV, UTF-8 TSV, or MARC (.mrc/.marc) input
 - Handles multiple ISBN columns (XML ISBN, HC ISBN, PB ISBN, ePub ISBN, ePDF ISBN)
 - Maps format types to appropriate itemSubType parameters for API calls
 - Searches WorldCat Metadata API with OAuth 2.0 authentication
@@ -30,6 +32,7 @@ Features:
 """
 
 import openpyxl
+import csv
 import requests
 from requests_oauthlib import OAuth2Session
 from oauthlib.oauth2 import BackendApplicationClient
@@ -59,7 +62,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class OCLCISBNMatcher:
-    """Class to handle WorldCat Metadata API searches and Excel file processing."""
+    """Class to handle WorldCat Metadata API searches and tabular input (Excel, CSV, TSV)."""
     
     def __init__(self, base_url: Optional[str] = None, 
                  api_key: Optional[str] = None,
@@ -986,180 +989,95 @@ class OCLCISBNMatcher:
         shutil.copy2(input_file, backup_file)
         logger.info(f"Created backup: {backup_file}")
         return backup_file
-    
-    def process_excel_file(self, input_file: str, output_file: str, create_backup: bool = True):
+
+    def _delimited_file_to_workbook(self, input_file: str, delimiter: str) -> openpyxl.Workbook:
         """
-        Process Excel file to add OCLC numbers using OR queries for ISBNs from the same row.
-        
+        Load a UTF-8 (with optional BOM) delimited file into a new single-sheet workbook.
+
         Args:
-            input_file: Path to input Excel file
-            output_file: Path to output Excel file
-            create_backup: Whether to create a backup of the input file
+            input_file: Path to the CSV or TSV file
+            delimiter: Field delimiter (comma or tab)
+
+        Returns:
+            New workbook with sheet data matching the delimited file rows.
         """
-        try:
-            # Create backup if requested
-            if create_backup:
-                self.create_backup(input_file)
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        with open(input_file, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.reader(handle, delimiter=delimiter)
+            for row_idx, row in enumerate(reader, start=1):
+                for col_idx, value in enumerate(row, start=1):
+                    worksheet.cell(
+                        row=row_idx,
+                        column=col_idx,
+                        value=None if value == "" else value,
+                    )
+        return workbook
+
+    def _process_workbook(self, workbook: openpyxl.Workbook, output_file: str) -> None:
+        """
+        Run OCLC matching on the active sheet and save to an Excel file.
+
+        Args:
+            workbook: Loaded or constructed workbook (active sheet is processed)
+            output_file: Path to the output .xlsx file
+        """
+        worksheet = workbook.active
+
+        # Find all ISBN columns
+        isbn_columns = self.find_isbn_columns(worksheet)
+        
+        if not isbn_columns:
+            raise ValueError("No ISBN columns found in the workbook")
+        
+        # Find format column
+        format_col = self.find_format_column(worksheet)
+        
+        # Find description column
+        description_col = self.find_description_column(worksheet)
+        
+        # Find additional columns for alternative search
+        title_col = self.find_column_by_name(worksheet, ['Title', 'title', 'TITLE'])
+        author_col = self.find_column_by_name(worksheet, ['Author', 'author', 'AUTHOR'])
+        publisher_col = self.find_column_by_name(worksheet, ['Publisher', 'publisher', 'PUBLISHER'])
+        pub_date_col = self.find_column_by_name(worksheet, ['Publication Date', 'publication_date', 'PublicationDate', 'Date', 'date'])
+        other_id_col_input = self.find_column_by_name(worksheet, ['Other Identifier', 'other_identifier', 'OtherIdentifier', 'Other ID', 'other_id'])
+        
+        # Find the last column to add our new columns
+        last_col = worksheet.max_column
+        oclc_col = last_col + 1
+        lcsh_col = last_col + 2
+        other_id_col = last_col + 3
+        
+        # Add headers for new columns
+        worksheet.cell(row=1, column=oclc_col, value='matchingOCLCNumber')
+        worksheet.cell(row=1, column=lcsh_col, value='hasLCSHSubjects')
+        worksheet.cell(row=1, column=other_id_col, value='Other Identifier')
+        
+        # Process each row individually
+        total_rows = worksheet.max_row
+        logger.info(f"Processing {total_rows - 1} records...")
+        
+        start_time = time.time()
+        
+        for row in range(2, total_rows + 1):  # Start from row 2 (skip header)
+            row_isbns = []
             
-            # Load Excel file
-            logger.info(f"Reading Excel file: {input_file}")
-            workbook = openpyxl.load_workbook(input_file)
-            worksheet = workbook.active
-            
-            # Find all ISBN columns
-            isbn_columns = self.find_isbn_columns(worksheet)
-            
-            if not isbn_columns:
-                raise ValueError("No ISBN columns found in the Excel file")
-            
-            # Find format column
-            format_col = self.find_format_column(worksheet)
-            
-            # Find description column
-            description_col = self.find_description_column(worksheet)
-            
-            # Find additional columns for alternative search
-            title_col = self.find_column_by_name(worksheet, ['Title', 'title', 'TITLE'])
-            author_col = self.find_column_by_name(worksheet, ['Author', 'author', 'AUTHOR'])
-            publisher_col = self.find_column_by_name(worksheet, ['Publisher', 'publisher', 'PUBLISHER'])
-            pub_date_col = self.find_column_by_name(worksheet, ['Publication Date', 'publication_date', 'PublicationDate', 'Date', 'date'])
-            other_id_col_input = self.find_column_by_name(worksheet, ['Other Identifier', 'other_identifier', 'OtherIdentifier', 'Other ID', 'other_id'])
-            
-            # Find the last column to add our new columns
-            last_col = worksheet.max_column
-            oclc_col = last_col + 1
-            lcsh_col = last_col + 2
-            other_id_col = last_col + 3
-            
-            # Add headers for new columns
-            worksheet.cell(row=1, column=oclc_col, value='matchingOCLCNumber')
-            worksheet.cell(row=1, column=lcsh_col, value='hasLCSHSubjects')
-            worksheet.cell(row=1, column=other_id_col, value='Other Identifier')
-            
-            # Process each row individually
-            total_rows = worksheet.max_row
-            logger.info(f"Processing {total_rows - 1} records...")
-            
-            start_time = time.time()
-            
-            for row in range(2, total_rows + 1):  # Start from row 2 (skip header)
-                row_isbns = []
+            # Collect all ISBNs from this row
+            for col_idx, col_name in isbn_columns:
+                isbn_cell = worksheet.cell(row=row, column=col_idx)
+                isbn = isbn_cell.value
                 
-                # Collect all ISBNs from this row
-                for col_idx, col_name in isbn_columns:
-                    isbn_cell = worksheet.cell(row=row, column=col_idx)
-                    isbn = isbn_cell.value
-                    
-                    # Skip if ISBN is empty or None
-                    if not isbn or str(isbn).strip() == '':
-                        continue
-                    
-                    isbn_str = str(isbn).strip()
-                    row_isbns.append(isbn_str)
-                
-                if not row_isbns:
-                    # No ISBNs in this row - try alternative search using title/author/publisher
-                    logger.info(f"Row {row}: No ISBNs found, attempting alternative search")
-                    
-                    # Get format and description values for this row
-                    format_value = None
-                    if format_col:
-                        format_cell = worksheet.cell(row=row, column=format_col)
-                        format_value = format_cell.value
-                        if format_value:
-                            format_value = str(format_value).strip()
-                    
-                    description_value = None
-                    if description_col:
-                        description_cell = worksheet.cell(row=row, column=description_col)
-                        description_value = description_cell.value
-                        if description_value:
-                            description_value = str(description_value).strip()
-                    
-                    # Determine final format (checking description last)
-                    final_format = self.determine_final_format(format_value, description_value)
-                    
-                    # Get title, author, publisher, and publication date
-                    title = None
-                    if title_col:
-                        title_cell = worksheet.cell(row=row, column=title_col)
-                        title = title_cell.value
-                        if title:
-                            title = str(title).strip()
-                    
-                    author = None
-                    if author_col:
-                        author_cell = worksheet.cell(row=row, column=author_col)
-                        author = author_cell.value
-                        if author:
-                            author = str(author).strip()
-                    
-                    publisher = None
-                    if publisher_col:
-                        publisher_cell = worksheet.cell(row=row, column=publisher_col)
-                        publisher = publisher_cell.value
-                        if publisher:
-                            publisher = str(publisher).strip()
-                    
-                    pub_date = None
-                    if pub_date_col:
-                        pub_date_cell = worksheet.cell(row=row, column=pub_date_col)
-                        pub_date = pub_date_cell.value
-                        if pub_date:
-                            pub_date = str(pub_date).strip()
-                    
-                    # Extract other identifier
-                    other_identifier = None
-                    if other_id_col_input:
-                        other_id_cell = worksheet.cell(row=row, column=other_id_col_input)
-                        other_identifier = other_id_cell.value
-                        if other_identifier:
-                            other_identifier = str(other_identifier).strip()
-                    
-                    # Search using title/author/publisher/other identifier
-                    format_display = final_format if final_format is not None else 'None (no itemType/itemSubType)'
-                    other_id_display = f", Other ID: '{other_identifier}'" if other_identifier else ""
-                    logger.info(f"Row {row}: Searching by title/author/publisher with format '{format_display}' - Title: '{title}', Author: '{author}', Publisher: '{publisher}', Date: '{pub_date}'{other_id_display}")
-                    result = self.search_by_title_author_publisher(title, author, publisher, pub_date, final_format, other_identifier)
-                    
-                    oclc_number = result.get('oclc_number')
-                    has_lcsh = result.get('has_lcsh', False)
-                    
-                    # Add OCLC number to the new column
-                    oclc_cell = worksheet.cell(row=row, column=oclc_col)
-                    oclc_cell.value = oclc_number
-                    
-                    # Add LCSH result to the new column
-                    lcsh_cell = worksheet.cell(row=row, column=lcsh_col)
-                    lcsh_cell.value = has_lcsh
-                    
-                    # Add other identifier to the new column (copy from input if available)
-                    other_id_cell = worksheet.cell(row=row, column=other_id_col)
-                    if other_id_col_input:
-                        other_id_value = worksheet.cell(row=row, column=other_id_col_input).value
-                        other_id_cell.value = other_id_value
-                    else:
-                        other_id_cell.value = ''
-                    
-                    # Update LCSH statistics if we found an OCLC number
-                    if oclc_number:
-                        if has_lcsh:
-                            self.stats['lcsh_found'] += 1
-                        else:
-                            self.stats['lcsh_not_found'] += 1
-                    
-                    # Update statistics
-                    self.stats['total_processed'] += 1
-                    if oclc_number:
-                        self.stats['successful_matches'] += 1
-                        logger.info(f"Row {row}: Found match via alternative search -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
-                    else:
-                        self.stats['no_matches'] += 1
-                        logger.warning(f"Row {row}: No match found via alternative search")
-                    
-                    # Add a small delay to be respectful to the API
-                    time.sleep(self.rate_limit_delay)
+                # Skip if ISBN is empty or None
+                if not isbn or str(isbn).strip() == '':
                     continue
+                
+                isbn_str = str(isbn).strip()
+                row_isbns.append(isbn_str)
+            
+            if not row_isbns:
+                # No ISBNs in this row - try alternative search using title/author/publisher
+                logger.info(f"Row {row}: No ISBNs found, attempting alternative search")
                 
                 # Get format and description values for this row
                 format_value = None
@@ -1179,28 +1097,51 @@ class OCLCISBNMatcher:
                 # Determine final format (checking description last)
                 final_format = self.determine_final_format(format_value, description_value)
                 
-                # Search for OCLC number using OR query for all ISBNs in this row
+                # Get title, author, publisher, and publication date
+                title = None
+                if title_col:
+                    title_cell = worksheet.cell(row=row, column=title_col)
+                    title = title_cell.value
+                    if title:
+                        title = str(title).strip()
+                
+                author = None
+                if author_col:
+                    author_cell = worksheet.cell(row=row, column=author_col)
+                    author = author_cell.value
+                    if author:
+                        author = str(author).strip()
+                
+                publisher = None
+                if publisher_col:
+                    publisher_cell = worksheet.cell(row=row, column=publisher_col)
+                    publisher = publisher_cell.value
+                    if publisher:
+                        publisher = str(publisher).strip()
+                
+                pub_date = None
+                if pub_date_col:
+                    pub_date_cell = worksheet.cell(row=row, column=pub_date_col)
+                    pub_date = pub_date_cell.value
+                    if pub_date:
+                        pub_date = str(pub_date).strip()
+                
+                # Extract other identifier
+                other_identifier = None
+                if other_id_col_input:
+                    other_id_cell = worksheet.cell(row=row, column=other_id_col_input)
+                    other_identifier = other_id_cell.value
+                    if other_identifier:
+                        other_identifier = str(other_identifier).strip()
+                
+                # Search using title/author/publisher/other identifier
                 format_display = final_format if final_format is not None else 'None (no itemType/itemSubType)'
-                logger.info(f"Row {row}: Searching for {len(row_isbns)} ISBNs with format '{format_display}': {', '.join(row_isbns)}")
-                row_results = self.search_by_isbns(row_isbns, final_format)
+                other_id_display = f", Other ID: '{other_identifier}'" if other_identifier else ""
+                logger.info(f"Row {row}: Searching by title/author/publisher with format '{format_display}' - Title: '{title}', Author: '{author}', Publisher: '{publisher}', Date: '{pub_date}'{other_id_display}")
+                result = self.search_by_title_author_publisher(title, author, publisher, pub_date, final_format, other_identifier)
                 
-                # Get the first match found (since all ISBNs are for the same work)
-                oclc_number = None
-                has_lcsh = False
-                matched_isbn = None
-                
-                for isbn in row_isbns:
-                    if isbn in row_results:
-                        result = row_results[isbn]
-                        if isinstance(result, dict):
-                            oclc_number = result.get('oclc_number')
-                            has_lcsh = result.get('has_lcsh', False)
-                        else:
-                            # Backward compatibility for old format
-                            oclc_number = result
-                            has_lcsh = False
-                        matched_isbn = isbn
-                        break
+                oclc_number = result.get('oclc_number')
+                has_lcsh = result.get('has_lcsh', False)
                 
                 # Add OCLC number to the new column
                 oclc_cell = worksheet.cell(row=row, column=oclc_col)
@@ -1229,34 +1170,153 @@ class OCLCISBNMatcher:
                 self.stats['total_processed'] += 1
                 if oclc_number:
                     self.stats['successful_matches'] += 1
-                    logger.info(f"Row {row}: Found match with ISBN {matched_isbn} -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
+                    logger.info(f"Row {row}: Found match via alternative search -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
                 else:
                     self.stats['no_matches'] += 1
-                    logger.warning(f"Row {row}: No match found for ISBNs: {', '.join(row_isbns)}")
+                    logger.warning(f"Row {row}: No match found via alternative search")
                 
                 # Add a small delay to be respectful to the API
                 time.sleep(self.rate_limit_delay)
-                
-                # Progress update
-                if (row - 1) % 50 == 0:
-                    elapsed_time = time.time() - start_time
-                    rate = (row - 1) / elapsed_time if elapsed_time > 0 else 0
-                    eta = (total_rows - row) / rate if rate > 0 else 0
-                    logger.info(f"Processed {row - 1}/{total_rows - 1} rows "
-                              f"({rate:.1f} rows/sec, ETA: {eta/60:.1f} minutes)")
+                continue
             
-            # Save the updated Excel file
-            logger.info(f"Saving results to: {output_file}")
-            workbook.save(output_file)
+            # Get format and description values for this row
+            format_value = None
+            if format_col:
+                format_cell = worksheet.cell(row=row, column=format_col)
+                format_value = format_cell.value
+                if format_value:
+                    format_value = str(format_value).strip()
             
-            # Print final summary
-            elapsed_time = time.time() - start_time
-            self.print_summary(elapsed_time)
+            description_value = None
+            if description_col:
+                description_cell = worksheet.cell(row=row, column=description_col)
+                description_value = description_cell.value
+                if description_value:
+                    description_value = str(description_value).strip()
             
+            # Determine final format (checking description last)
+            final_format = self.determine_final_format(format_value, description_value)
+            
+            # Search for OCLC number using OR query for all ISBNs in this row
+            format_display = final_format if final_format is not None else 'None (no itemType/itemSubType)'
+            logger.info(f"Row {row}: Searching for {len(row_isbns)} ISBNs with format '{format_display}': {', '.join(row_isbns)}")
+            row_results = self.search_by_isbns(row_isbns, final_format)
+            
+            # Get the first match found (since all ISBNs are for the same work)
+            oclc_number = None
+            has_lcsh = False
+            matched_isbn = None
+            
+            for isbn in row_isbns:
+                if isbn in row_results:
+                    result = row_results[isbn]
+                    if isinstance(result, dict):
+                        oclc_number = result.get('oclc_number')
+                        has_lcsh = result.get('has_lcsh', False)
+                    else:
+                        # Backward compatibility for old format
+                        oclc_number = result
+                        has_lcsh = False
+                    matched_isbn = isbn
+                    break
+            
+            # Add OCLC number to the new column
+            oclc_cell = worksheet.cell(row=row, column=oclc_col)
+            oclc_cell.value = oclc_number
+            
+            # Add LCSH result to the new column
+            lcsh_cell = worksheet.cell(row=row, column=lcsh_col)
+            lcsh_cell.value = has_lcsh
+            
+            # Add other identifier to the new column (copy from input if available)
+            other_id_cell = worksheet.cell(row=row, column=other_id_col)
+            if other_id_col_input:
+                other_id_value = worksheet.cell(row=row, column=other_id_col_input).value
+                other_id_cell.value = other_id_value
+            else:
+                other_id_cell.value = ''
+            
+            # Update LCSH statistics if we found an OCLC number
+            if oclc_number:
+                if has_lcsh:
+                    self.stats['lcsh_found'] += 1
+                else:
+                    self.stats['lcsh_not_found'] += 1
+            
+            # Update statistics
+            self.stats['total_processed'] += 1
+            if oclc_number:
+                self.stats['successful_matches'] += 1
+                logger.info(f"Row {row}: Found match with ISBN {matched_isbn} -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
+            else:
+                self.stats['no_matches'] += 1
+                logger.warning(f"Row {row}: No match found for ISBNs: {', '.join(row_isbns)}")
+            
+            # Add a small delay to be respectful to the API
+            time.sleep(self.rate_limit_delay)
+            
+            # Progress update
+            if (row - 1) % 50 == 0:
+                elapsed_time = time.time() - start_time
+                rate = (row - 1) / elapsed_time if elapsed_time > 0 else 0
+                eta = (total_rows - row) / rate if rate > 0 else 0
+                logger.info(f"Processed {row - 1}/{total_rows - 1} rows "
+                          f"({rate:.1f} rows/sec, ETA: {eta/60:.1f} minutes)")
+        
+        # Save the updated Excel file
+        logger.info(f"Saving results to: {output_file}")
+        workbook.save(output_file)
+        
+        # Print final summary
+        elapsed_time = time.time() - start_time
+        self.print_summary(elapsed_time)
+
+    def process_excel_file(self, input_file: str, output_file: str, create_backup: bool = True):
+        """
+        Process Excel file to add OCLC numbers using OR queries for ISBNs from the same row.
+
+        Args:
+            input_file: Path to input Excel file (.xlsx)
+            output_file: Path to output Excel file
+            create_backup: Whether to create a backup of the input file
+        """
+        try:
+            if create_backup:
+                self.create_backup(input_file)
+            logger.info(f"Reading Excel file: {input_file}")
+            workbook = openpyxl.load_workbook(input_file)
+            self._process_workbook(workbook, output_file)
         except Exception as e:
             logger.error(f"Error processing Excel file: {e}")
             raise
-    
+
+    def process_delimited_file(
+        self,
+        input_file: str,
+        output_file: str,
+        delimiter: str,
+        create_backup: bool = True,
+    ) -> None:
+        """
+        Process a CSV or TSV file (UTF-8 with optional BOM) and write results to an Excel file.
+
+        Args:
+            input_file: Path to input CSV or TSV
+            output_file: Path to output .xlsx file
+            delimiter: Field delimiter for csv.reader (comma or tab)
+            create_backup: Whether to create a backup of the input file
+        """
+        try:
+            if create_backup:
+                self.create_backup(input_file)
+            label = "TSV" if delimiter == "\t" else "CSV"
+            logger.info(f"Reading {label} file: {input_file}")
+            workbook = self._delimited_file_to_workbook(input_file, delimiter)
+            self._process_workbook(workbook, output_file)
+        except Exception as e:
+            logger.error(f"Error processing delimited file: {e}")
+            raise
+
     def extract_marc_data(self, marc_file: str) -> str:
         """
         Extract data from MARC file and create temporary Excel file.
@@ -1317,23 +1377,26 @@ def detect_file_type(file_path: str) -> str:
         file_path: Path to the file
         
     Returns:
-        File type: 'excel', 'marc', or 'unknown'
+        File type: 'excel', 'csv', 'tsv', 'marc', or 'unknown'
     """
     path = Path(file_path)
     extension = path.suffix.lower()
-    
+
     if extension in ['.xlsx', '.xls']:
         return 'excel'
-    elif extension in ['.mrc', '.marc']:
+    if extension == '.csv':
+        return 'csv'
+    if extension == '.tsv':
+        return 'tsv'
+    if extension in ['.mrc', '.marc']:
         return 'marc'
-    else:
-        return 'unknown'
+    return 'unknown'
 
 
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="OCLC Record Matcher - Search OCLC Discovery Stratus API for ISBNs and add OCLC numbers to Excel or MARC files",
+        description="OCLC Record Matcher - Search OCLC Discovery Stratus API for ISBNs and add OCLC numbers to Excel, CSV, TSV, or MARC inputs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1345,6 +1408,10 @@ Examples:
   
   # Process MARC file
   python3 oclc_record_matcher.py -i catalog.mrc -o catalog_with_oclc.xlsx
+
+  # Process CSV or TSV (UTF-8; output is always .xlsx)
+  python3 oclc_record_matcher.py -i my_books.csv -o my_books_with_oclc.xlsx
+  python3 oclc_record_matcher.py -i my_books.tsv -o my_books_with_oclc.xlsx
   
   # Process file without creating backup
   python3 oclc_record_matcher.py -i books.xlsx --no-backup
@@ -1357,7 +1424,7 @@ Examples:
     parser.add_argument(
         '-i', '--input',
         default='sampleData/recordsToMatch.xlsx',
-        help='Input file path (Excel .xlsx/.xls or MARC .mrc/.marc file) (default: sampleData/recordsToMatch.xlsx)'
+        help='Input file path (.xlsx/.xls, .csv, .tsv, or MARC .mrc/.marc) (default: sampleData/recordsToMatch.xlsx)'
     )
     
     parser.add_argument(
@@ -1442,7 +1509,7 @@ def main():
     file_type = detect_file_type(input_file)
     if file_type == 'unknown':
         logger.error(f"Unsupported file type: {input_file}")
-        logger.info("Supported file types: .xlsx, .xls, .mrc, .marc")
+        logger.info("Supported file types: .xlsx, .xls, .csv, .tsv, .mrc, .marc")
         sys.exit(1)
     
     # Check if output file already exists
@@ -1490,10 +1557,19 @@ def main():
                 logger.info("Temporary file cleaned up")
             except Exception as e:
                 logger.warning(f"Could not remove temporary file {temp_excel}: {e}")
-                
-        else:  # file_type == 'excel'
-            # Process Excel file directly
-            matcher.process_excel_file(input_file, output_file, create_backup=not args.no_backup)
+
+        elif file_type == 'csv':
+            matcher.process_delimited_file(
+                input_file, output_file, ",", create_backup=not args.no_backup
+            )
+        elif file_type == 'tsv':
+            matcher.process_delimited_file(
+                input_file, output_file, "\t", create_backup=not args.no_backup
+            )
+        else:  # excel
+            matcher.process_excel_file(
+                input_file, output_file, create_backup=not args.no_backup
+            )
         
         # Print API statistics
         matcher.print_api_statistics()
