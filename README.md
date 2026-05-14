@@ -11,7 +11,7 @@ This project provides tools for processing bibliographic records and matching th
 - **OR query optimization**: Combines all ISBNs from the same row in a single brief-bibs API call
 - **Alternative search**: When no ISBN is available, searches using title, author, publisher, and publication date
 - **Format-based search**: Maps format types to appropriate OCLC API parameters
-- **LCSH detection**: Identifies Library of Congress Subject Headings in matched records (via full bib JSON where applicable)
+- **LCSH detection (optional)**: Off by default for fewer API calls; pass **`--lcsh`** to fill `hasLCSHSubjects` via full bib JSON (`GET /worldcat/bibs/{oclcNumber}`)
 - **MARCXML export**: Optional combined **MARCXML** file for distinct matched OCLC numbers using `GET /worldcat/manage/bibs/{oclcNumber}` (`--marcxml-output`)
 - **MARC-only runs**: If you pass `--marcxml-output` and **omit** `-o`, no Excel file is written; you only get the combined MARCXML (matching still runs in memory)
 - **Comprehensive logging**: Detailed API request/response logging with configurable verbosity
@@ -193,6 +193,7 @@ python oclc_record_matcher.py -i sampleData/MLN-cataloging-RFP-vendor-sample-bat
 | `-i, --input` | Input path: `.xlsx` / `.xls`, `.csv`, `.tsv`, or `.mrc` / `.marc` | `sampleData/recordsToMatch.xlsx` |
 | `-o, --output` | Output Excel (`.xlsx`). Optional when `--marcxml-output` is set; omit `-o` for MARCXML-only | `<input_stem>_with_oclc.xlsx` |
 | `--marcxml-output FILE` | After matching, write one combined MARCXML file (manage bibs) for distinct matched OCLC numbers | (disabled) |
+| `--lcsh` | After each match, call GET `/worldcat/bibs/{oclcNumber}` to detect LCSH and fill `hasLCSHSubjects` | Off (fewer API calls) |
 | `--no-backup` | Skip creating backup of input file | Create backup |
 | `--log-level` | Set logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `--log-file` | Custom log file path | `oclc_matcher.log` |
@@ -230,6 +231,14 @@ python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched.xlsx 
 
 # Same, from a UTF-8 CSV
 python oclc_record_matcher.py -i data/books.csv -o data/books_with_oclc.xlsx --marcxml-output exports/books.xml
+```
+
+#### LCSH column (`--lcsh`)
+
+By default **`hasLCSHSubjects`** is left empty. Pass **`--lcsh`** to run an extra bib lookup per match and populate true/false (requires **`WorldCatMetadataAPI:read_bibs`** or equivalent for `GET /worldcat/bibs/{oclcNumber}`).
+
+```bash
+python oclc_record_matcher.py -i sampleData/recordsToMatch.xlsx -o matched.xlsx --lcsh
 ```
 
 #### MARCXML only (omit `-o`)
@@ -344,7 +353,7 @@ The script intelligently maps format types to OCLC API parameters:
 
 - All original columns from the input sheet
 - `matchingOCLCNumber` — OCLC number when a match is found
-- `hasLCSHSubjects` — whether LCSH-style subjects were detected in the supporting bib check
+- `hasLCSHSubjects` — when **`--lcsh`** is set: whether LCSH-style subjects were detected; otherwise the column is left empty (default)
 - `Other Identifier` — propagated when present in the source column mapping
 - Empty cells / missing values where no match was found
 
@@ -375,7 +384,7 @@ The field analyzer creates an Excel report with:
 - **API request details**: URL, parameters, headers, query structure
 - **Response details**: Status code, headers, response size, content (truncated where large)
 - **Error logging**: Detailed error information with response bodies when available
-- **Statistics**: API usage, success rates, and (when used) manage-bib MARCXML fetch counts
+- **Statistics**: API usage, success rates, optional LCSH counts when **`--lcsh`** is used, and manage-bib MARCXML fetch counts when **`--marcxml-output`** is used
 - **Progress tracking**: Real-time progress with ETA during row processing
 - **Row-by-row details**: Per-record processing messages at verbose log levels
 
@@ -426,7 +435,8 @@ The field analyzer creates an Excel report with:
 4. **API authentication and scopes**: 
    - Ensure `OCLC_API_KEY` and `OCLC_API_SECRET` are set in your `.env` file
    - Verify your credentials at the [OCLC Developer Network](https://www.oclc.org/developer/api/oclc-apis/worldcat-metadata-api.en.html)
-   - Matching uses search and bib read patterns; ensure the WSKey is enabled for **WorldCat Metadata API** with appropriate scopes (for example **`WorldCatMetadataAPI:match_bibs`** and **`WorldCatMetadataAPI:read_bibs`** where required for your workflow)
+   - Matching needs **`WorldCatMetadataAPI:match_bibs`** (and related search scopes) on the WSKey
+   - **`--lcsh`** adds **`GET /worldcat/bibs/{oclcNumber}`**; ensure **`WorldCatMetadataAPI:read_bibs`** (or equivalent) is enabled if you use that flag
    - **`--marcxml-output`** calls **`GET /worldcat/manage/bibs/{oclcNumber}`** with `Accept: application/marcxml+xml`; the key needs **`WorldCatMetadataAPI:manage_bibs`** and/or **`WorldCatMetadataAPI:view_marc_bib`** per the [OpenAPI security requirements](https://developer.api.oclc.org/docs/wc-metadata/openapi-external-prod.yaml)
 
 ### Testing
@@ -455,7 +465,7 @@ This project uses the **WorldCat Metadata API** as documented in the [OpenAPI sp
 | Operation | HTTP | Path | Role in this project |
 |-----------|------|------|----------------------|
 | Brief search | `GET` | `/worldcat/search/brief-bibs` | Primary ISBN / title-author matching; returns `oclcNumber` among other brief fields |
-| Full bib (JSON) | `GET` | `/worldcat/bibs/{oclcNumber}` | LCSH-style subject check on the retrieved bib (`Accept: application/json`) |
+| Full bib (JSON) | `GET` | `/worldcat/bibs/{oclcNumber}` | Optional LCSH-style subject check when you pass **`--lcsh`** (`Accept: application/json`) |
 | Manage bib (MARCXML) | `GET` | `/worldcat/manage/bibs/{oclcNumber}` | Optional export: full bibliographic record as MARCXML (`Accept: application/marcxml+xml`) |
 
 - **Authentication**: OAuth 2.0 client credentials

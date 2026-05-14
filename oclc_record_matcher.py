@@ -25,6 +25,7 @@ Features:
 - Handles multiple ISBN columns (XML ISBN, HC ISBN, PB ISBN, ePub ISBN, ePDF ISBN)
 - Maps format types to appropriate itemSubType parameters for API calls
 - Searches WorldCat Metadata API with OAuth 2.0 authentication
+- Optional LCSH detection: off by default; pass ``--lcsh`` to call GET /worldcat/bibs/{id} after each match
 - Optional: write only combined MARCXML (no Excel) when ``--marcxml-output`` is set without ``-o``
 - Adds rate limiting and error handling
 - Provides detailed logging and progress tracking
@@ -72,7 +73,8 @@ class OCLCISBNMatcher:
                  oauth_token_url: Optional[str] = None,
                  api_logging: Optional[bool] = None,
                  timeout: Optional[int] = None,
-                 rate_limit_delay: Optional[float] = None):
+                 rate_limit_delay: Optional[float] = None,
+                 check_lcsh: bool = False):
         """
         Initialize the OCLC ISBN Matcher with WorldCat Metadata API.
         
@@ -84,6 +86,8 @@ class OCLCISBNMatcher:
             api_logging: Whether to enable detailed API request/response logging (defaults to env var)
             timeout: Request timeout in seconds (defaults to API_TIMEOUT env var or 30)
             rate_limit_delay: Delay between requests in seconds (defaults to API_RATE_LIMIT_DELAY env var or 0.5)
+            check_lcsh: If True, call GET /worldcat/bibs/{id} to detect LCSH after a match.
+                Default False (no extra bib requests); use CLI ``--lcsh`` to enable.
         """
         # Load configuration from environment variables
         self.base_url = base_url or os.getenv('OCLC_API_BASE_URL', 'https://metadata.api.oclc.org')
@@ -93,6 +97,7 @@ class OCLCISBNMatcher:
         self.api_logging = api_logging if api_logging is not None else os.getenv('API_LOGGING', 'true').lower() == 'true'
         self.timeout = timeout or int(os.getenv('API_TIMEOUT', '30'))
         self.rate_limit_delay = rate_limit_delay or float(os.getenv('API_RATE_LIMIT_DELAY', '0.5'))
+        self.check_lcsh = check_lcsh
         
         # Validate required credentials
         if not self.api_key or not self.api_secret:
@@ -574,8 +579,10 @@ class OCLCISBNMatcher:
                 oclc_number = brief_record.get('oclcNumber')
                 
                 if oclc_number:
-                    # Check for LCSH subjects by fetching full record from /bibs endpoint
-                    has_lcsh = self._check_lcsh_in_bib_record(oclc_number)
+                    if self.check_lcsh:
+                        has_lcsh = self._check_lcsh_in_bib_record(oclc_number)
+                    else:
+                        has_lcsh = None
                     
                     # Since all ISBNs in the query are for the same work,
                     # we can associate the found OCLC number and LCSH status with all of them
@@ -759,8 +766,14 @@ class OCLCISBNMatcher:
                     brief_record = brief_records[0]  # Get first result
                     # Extract OCLC number directly from brief record (not nested in identifier)
                     oclc_number = brief_record.get('oclcNumber')
-                    # Check for LCSH subjects by fetching full record from /bibs endpoint
-                    has_lcsh = self._check_lcsh_in_bib_record(oclc_number) if oclc_number else False
+                    if oclc_number:
+                        has_lcsh = (
+                            self._check_lcsh_in_bib_record(oclc_number)
+                            if self.check_lcsh
+                            else None
+                        )
+                    else:
+                        has_lcsh = False
                     
                     logger.debug(f"Found match {attempt_name}: OCLC {oclc_number}, LCSH: {has_lcsh}")
                     return {
@@ -1366,7 +1379,9 @@ class OCLCISBNMatcher:
                 result = self.search_by_title_author_publisher(title, author, publisher, pub_date, final_format, other_identifier)
                 
                 oclc_number = result.get('oclc_number')
-                has_lcsh = result.get('has_lcsh', False)
+                has_lcsh = result.get('has_lcsh')
+                if has_lcsh is not None and not isinstance(has_lcsh, bool):
+                    has_lcsh = False
                 
                 # Add OCLC number to the new column
                 oclc_cell = worksheet.cell(row=row, column=oclc_col)
@@ -1385,8 +1400,8 @@ class OCLCISBNMatcher:
                 else:
                     other_id_cell.value = ''
                 
-                # Update LCSH statistics if we found an OCLC number
-                if oclc_number:
+                # Update LCSH statistics only when LCSH was evaluated (boolean)
+                if oclc_number and isinstance(has_lcsh, bool):
                     if has_lcsh:
                         self.stats['lcsh_found'] += 1
                     else:
@@ -1396,7 +1411,14 @@ class OCLCISBNMatcher:
                 self.stats['total_processed'] += 1
                 if oclc_number:
                     self.stats['successful_matches'] += 1
-                    logger.info(f"Row {row}: Found match via alternative search -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
+                    lcsh_note = (
+                        has_lcsh
+                        if isinstance(has_lcsh, bool)
+                        else 'not checked (use --lcsh to enable)'
+                    )
+                    logger.info(
+                        f"Row {row}: Found match via alternative search -> OCLC: {oclc_number}, LCSH: {lcsh_note}"
+                    )
                 else:
                     self.stats['no_matches'] += 1
                     logger.warning(f"Row {row}: No match found via alternative search")
@@ -1438,7 +1460,9 @@ class OCLCISBNMatcher:
                     result = row_results[isbn]
                     if isinstance(result, dict):
                         oclc_number = result.get('oclc_number')
-                        has_lcsh = result.get('has_lcsh', False)
+                        has_lcsh = result.get('has_lcsh')
+                        if has_lcsh is not None and not isinstance(has_lcsh, bool):
+                            has_lcsh = False
                     else:
                         # Backward compatibility for old format
                         oclc_number = result
@@ -1463,8 +1487,8 @@ class OCLCISBNMatcher:
             else:
                 other_id_cell.value = ''
             
-            # Update LCSH statistics if we found an OCLC number
-            if oclc_number:
+            # Update LCSH statistics only when LCSH was evaluated (boolean)
+            if oclc_number and isinstance(has_lcsh, bool):
                 if has_lcsh:
                     self.stats['lcsh_found'] += 1
                 else:
@@ -1474,7 +1498,14 @@ class OCLCISBNMatcher:
             self.stats['total_processed'] += 1
             if oclc_number:
                 self.stats['successful_matches'] += 1
-                logger.info(f"Row {row}: Found match with ISBN {matched_isbn} -> OCLC: {oclc_number}, LCSH: {has_lcsh}")
+                lcsh_note = (
+                    has_lcsh
+                    if isinstance(has_lcsh, bool)
+                    else 'not checked (use --lcsh to enable)'
+                )
+                logger.info(
+                    f"Row {row}: Found match with ISBN {matched_isbn} -> OCLC: {oclc_number}, LCSH: {lcsh_note}"
+                )
             else:
                 self.stats['no_matches'] += 1
                 logger.warning(f"Row {row}: No match found for ISBNs: {', '.join(row_isbns)}")
@@ -1593,14 +1624,25 @@ class OCLCISBNMatcher:
         logger.info(f"No matches found: {self.stats['no_matches']}")
         logger.info(f"Empty ISBNs: {self.stats['empty_isbns']}")
         logger.info(f"API errors: {self.stats['api_errors']}")
-        logger.info(f"Success rate: {(self.stats['successful_matches']/self.stats['total_processed']*100):.1f}%")
-        logger.info(f"LCSH subjects found: {self.stats['lcsh_found']}")
-        logger.info(f"LCSH subjects not found: {self.stats['lcsh_not_found']}")
-        if self.stats['successful_matches'] > 0:
-            lcsh_rate = (self.stats['lcsh_found'] / self.stats['successful_matches'] * 100)
-            logger.info(f"LCSH rate: {lcsh_rate:.1f}%")
+        if self.stats['total_processed'] > 0:
+            logger.info(
+                f"Success rate: {(self.stats['successful_matches']/self.stats['total_processed']*100):.1f}%"
+            )
+        else:
+            logger.info("Success rate: N/A (no rows processed)")
+        if self.check_lcsh:
+            logger.info(f"LCSH subjects found: {self.stats['lcsh_found']}")
+            logger.info(f"LCSH subjects not found: {self.stats['lcsh_not_found']}")
+            if self.stats['successful_matches'] > 0:
+                lcsh_rate = (self.stats['lcsh_found'] / self.stats['successful_matches'] * 100)
+                logger.info(f"LCSH rate: {lcsh_rate:.1f}%")
+        else:
+            logger.info("LCSH subjects: not checked (default); hasLCSHSubjects column left empty. Use --lcsh to enable.")
         logger.info(f"Total time: {elapsed_time/60:.1f} minutes")
-        logger.info(f"Average rate: {self.stats['total_processed']/elapsed_time:.1f} records/second")
+        if elapsed_time > 0 and self.stats['total_processed'] > 0:
+            logger.info(
+                f"Average rate: {self.stats['total_processed']/elapsed_time:.1f} records/second"
+            )
         logger.info("=" * 60)
 
 
@@ -1659,6 +1701,9 @@ Examples:
 
   # MARCXML only (no Excel): omit -o when using --marcxml-output
   python3 oclc_record_matcher.py -i books.csv --marcxml-output matched_bibs.xml
+
+  # Enable LCSH detection (extra GET /worldcat/bibs/{id} per match)
+  python3 oclc_record_matcher.py -i books.xlsx -o out.xlsx --lcsh
         """
     )
     
@@ -1699,6 +1744,15 @@ Examples:
         '--no-api-logging',
         action='store_true',
         help='Disable detailed API request/response logging (reduces log verbosity)'
+    )
+
+    parser.add_argument(
+        '--lcsh',
+        action='store_true',
+        help=(
+            'After each match, call GET /worldcat/bibs/{oclcNumber} to detect LCSH-style subjects '
+            'and fill hasLCSHSubjects. Off by default (faster; fewer API calls).'
+        ),
     )
 
     parser.add_argument(
@@ -1798,6 +1852,8 @@ def main():
         logger.info("Output Excel file: (skipped; MARCXML-only)")
     logger.info(f"Create backup: {not args.no_backup}")
     logger.info(f"Log level: {args.log_level}")
+    if args.lcsh:
+        logger.info("LCSH detection: enabled (--lcsh)")
     if marcxml_out:
         logger.info(f"MARCXML export file: {marcxml_out}")
     logger.info("=" * 60)
@@ -1805,7 +1861,10 @@ def main():
     # Create matcher instance with OAuth 2.0 authentication
     api_logging = not args.no_api_logging
     try:
-        matcher = OCLCISBNMatcher(api_logging=api_logging)
+        matcher = OCLCISBNMatcher(
+            api_logging=api_logging,
+            check_lcsh=args.lcsh,
+        )
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         logger.info("Please ensure OCLC_API_KEY and OCLC_API_SECRET are set in your .env file")
